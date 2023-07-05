@@ -40,15 +40,13 @@ class Controller:
     # Send the crc byte after the cmd byte. If this CRC byte is incorrect,
     # the Maestro will set the 'Serial CRC' error bit in the error register and ignore the command.
     def crc7(cmd):
-        POLY = 0x91
-
         cmd = [ord(c) for c in cmd] + [0] # Append zeros
         remainder = cmd[0] # Initialize remainder
 
         # Iterate through bytes, then bits of each byte
         for octet in cmd[1:]:
             for pos in range(8):
-                remainder ^= (POLY if (remainder % 2) else 0x00) # Perform xor
+                remainder ^= (0x91 if (remainder % 2) else 0x00) # Perform xor. CRC Polynomial = 0x91
                 remainder >>= 1 # Right shift
                 remainder += 0x80 if (octet & (1 << pos)) else 0x00 # Append new msb
 
@@ -281,29 +279,3 @@ class Controller:
     def isScriptRunning(self):
         self.sendCmd(0x2E)
         return True if ord(self.usb.read()) == 0x00 else False
-
-
-    def crc7(val: str) -> str:
-        POLY = 0x91
-        num_bits = 8*len(val)
-
-        # Convert val to int
-        temp = 0
-        for i, octet in enumerate(bytes(val)):
-            temp += ord(octet) << 4*i
-
-        remainder = (0xfe << num_bits-7) & temp # Take top 7 bits
-
-        for i in range(8, num_bits, -1):
-            # Take the xor if msb is one
-            if remainder & 0x80:
-                remainder = remainder^POLY
-
-            # Append new lsb
-            remainder = (remainder << 1) + int((0x01 << num_bits-i) & temp)
-
-        return remainder
-
-
-
-import math
