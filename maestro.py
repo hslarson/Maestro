@@ -31,7 +31,7 @@ class Controller:
 
     # Seperate a value into high and low bytes
     def split(self, val):
-        lsb = val & 0x7f        # 7 bits for least significant byte
+        lsb = val & 0x7f # 7 bits for least significant byte
         msb = (val >> 7) & 0x7f # shift 7 and take next 7 bits for msb
         return chr(lsb) + chr(msb)
 
@@ -50,12 +50,13 @@ class Controller:
                 remainder >>= 1 # Right shift
                 remainder += 0x80 if (octet & (1 << pos)) else 0x00 # Append new msb
 
-        return chr(remainder)
+        return chr(remainder & 0x7fff) # always clear msb (may be redundant)
 
 
     # Send a Pololu command out the serial port
     def sendCmd(self, cmd):
         cmdStr = self.PololuCmd + cmd
+        # cmdStr += self.crc7(cmdStr)
         self.usb.write(cmdStr if PY2 else bytes(cmdStr,'latin-1'))
 
 
@@ -108,7 +109,6 @@ class Controller:
     def setMultipleTargets(self, first_chan, *args): # args: target 1, target 2, ...
         # Send setup bytes
         cmd = chr(0x1f) + chr(len(args)) + chr(first_chan)
-        self.sendCmd(cmd)
 
         # Send targets
         for n, target in enumerate(args):
@@ -123,10 +123,12 @@ class Controller:
                 target = self.Maxs[chan]
 
             # Send target
-            self.sendCmd(self.split(target))
+            cmd += self.split(target)
 
             # Record Target value
             self.Targets[chan] = target
+
+        self.sendCmd(cmd)
 
 
     # Used for digital IO
@@ -165,7 +167,7 @@ class Controller:
         self.sendCmd(cmd)
 
 
-    # Configure the one PWM output natively supported by the maestro
+    # Configure the maestro's PWM channel
     # Freq units=Hz, duty=[0,1]
     def setPWM(self, freq, duty):
         period = round((1/freq)/(1/48e-6)) # Units: 1/48 μs
@@ -240,7 +242,8 @@ class Controller:
     # Bit 7: Script call stack error
     # Bit 8: Script program counter error
     def getErrors(self):
-        self.sendCmd(0x21)
+        cmd = chr(0x21)
+        self.sendCmd(cmd)
 
         lsb = ord(self.usb.read())
         msb = ord(self.usb.read())
@@ -250,7 +253,8 @@ class Controller:
     # Go home
     # !!!!!!!!!!!!!! THIS MESSES UP TARGETS
     def goHome(self):
-        self.sendCmd(0x22)
+        cmd = chr(0x22)
+        self.sendCmd(cmd)
 
 
     # Run a Maestro Script subroutine in the currently active script. Scripts can
@@ -277,5 +281,6 @@ class Controller:
     # Get script status
     # Response: 0x00 if the script is running, 0x01 if the script is stopped
     def isScriptRunning(self):
-        self.sendCmd(0x2E)
+        cmd = chr(0x2E)
+        self.sendCmd(cmd)
         return True if ord(self.usb.read()) == 0x00 else False
