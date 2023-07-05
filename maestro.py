@@ -1,11 +1,3 @@
-
-# Maestro Servo Controller
-# ------------------------
-
-# When connected via USB, the Maestro creates two virtual serial ports /dev/ttyACM0 for commands and /dev/ttyACM1 for communications.
-# Be sure the Maestro is configured for "USB Dual Port" serial mode. "USB Chained Mode" may work as well, but hasn't been tested.
-
-
 import serial
 from sys import version_info
 
@@ -13,7 +5,8 @@ PY2 = version_info[0] == 2   #Running Python 2.x?
 
 
 class Controller:
-
+    # When connected via USB, the Maestro creates two virtual serial ports /dev/ttyACM0 for commands and /dev/ttyACM1 for communications.
+    # Be sure the Maestro is configured for "USB Dual Port" serial mode. "USB Chained Mode" may work as well, but hasn't been tested.
     def __init__(self,ttyStr='/dev/ttyACM0', device=0x0c):
         # Open the command port
         self.usb = serial.Serial(ttyStr, baudrate=115200)
@@ -41,6 +34,25 @@ class Controller:
         lsb = val & 0x7f        # 7 bits for least significant byte
         msb = (val >> 7) & 0x7f # shift 7 and take next 7 bits for msb
         return chr(lsb) + chr(msb)
+
+
+    # Calculate CRC-7 polynomial for a string of hex bytes
+    # Send the crc byte after the cmd byte. If this CRC byte is incorrect,
+    # the Maestro will set the 'Serial CRC' error bit in the error register and ignore the command.
+    def crc7(cmd):
+        POLY = 0x91
+
+        cmd = [ord(c) for c in cmd] + [0] # Append zeros
+        remainder = cmd[0] # Initialize remainder
+
+        # Iterate through bytes, then bits of each byte
+        for octet in cmd[1:]:
+            for pos in range(8):
+                remainder ^= (POLY if (remainder % 2) else 0x00) # Perform xor
+                remainder >>= 1 # Right shift
+                remainder += 0x80 if (octet & (1 << pos)) else 0x00 # Append new msb
+
+        return chr(remainder)
 
 
     # Send a Pololu command out the serial port
@@ -93,7 +105,7 @@ class Controller:
         # Record Target value
         self.Targets[chan] = target
 
-    
+
     # Set a contiguous block of targets (e.g. channel 4, 5, and 6)
     def setMultipleTargets(self, first_chan, *args): # args: target 1, target 2, ...
         # Send setup bytes
@@ -118,13 +130,13 @@ class Controller:
             # Record Target value
             self.Targets[chan] = target
 
-    
+
     # Used for digital IO
     HIGH = 0x3fff
     LOW  = 0x0000
 
-    # If the channel is configured as a digital output, 
-    # values less than 6000 tell the Maestro to drive the line low, 
+    # If the channel is configured as a digital output,
+    # values less than 6000 tell the Maestro to drive the line low,
     # while values of 6000 or greater tell the Maestro to drive the line high.
     def digitalWrite(self, chan, val):
         self.setTarget(chan, val)
@@ -179,13 +191,13 @@ class Controller:
         lsb = ord(self.usb.read())
         msb = ord(self.usb.read())
         return (msb << 8) + lsb
-    
+
 
     # If the channel is configured as an input, the position represents the voltage measured on the channel.
     # The inputs on channels 12–23 are digital: their values are either exactly 0 or exactly 1023.
     def digitalRead(self, chan):
         return self.HIGH if self.getPosition(chan) == 1023 else self.LOW
-    
+
 
     # If the channel is configured as an input, the position represents the voltage measured on the channel.
     # The inputs on channels 0–11 are analog: their values range from 0 to 1023, representing voltages from 0 to 5 V
@@ -220,6 +232,15 @@ class Controller:
 
     # Get errors
     # Response: error bits 0-7, error bits 8-15
+    # Bit 0: Serial signal error
+    # Bit 1: Serial overrun error
+    # Bit 2: Serial buffer full
+    # Bit 3: Serial CRC error
+    # Bit 4: Serial protocol error
+    # Bit 5: Serial timeout
+    # Bit 6: Script stack error
+    # Bit 7: Script call stack error
+    # Bit 8: Script program counter error
     def getErrors(self):
         self.sendCmd(0x21)
 
@@ -239,11 +260,11 @@ class Controller:
     # Maestro subroutine to either infinitely loop, or just end (return is not valid).
     def runScriptSub(self, subNumber, param=None):
         # Pass a parameter to script
-        if param != None: 
+        if param != None:
             cmd = chr(0x28) + chr(subNumber) + self.split(param)
-        
+
         # Run script with no parameter
-        else: 
+        else:
             cmd = chr(0x27) + chr(subNumber)
 
         self.sendCmd(cmd)
@@ -260,3 +281,29 @@ class Controller:
     def isScriptRunning(self):
         self.sendCmd(0x2E)
         return True if ord(self.usb.read()) == 0x00 else False
+
+
+    def crc7(val: str) -> str:
+        POLY = 0x91
+        num_bits = 8*len(val)
+
+        # Convert val to int
+        temp = 0
+        for i, octet in enumerate(bytes(val)):
+            temp += ord(octet) << 4*i
+
+        remainder = (0xfe << num_bits-7) & temp # Take top 7 bits
+
+        for i in range(8, num_bits, -1):
+            # Take the xor if msb is one
+            if remainder & 0x80:
+                remainder = remainder^POLY
+
+            # Append new lsb
+            remainder = (remainder << 1) + int((0x01 << num_bits-i) & temp)
+
+        return remainder
+
+
+
+import math
