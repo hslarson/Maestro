@@ -1,27 +1,77 @@
 import serial
+import xmltodict
 from sys import version_info
 
 PY2 = version_info[0] == 2   #Running Python 2.x?
 
 
+class Channel:
+    def __init__(self, channel_dict):
+        # Mode
+        self.mode = channel_dict["@mode"]
+        self.multiplied = (self.mode == "ServoMultiplied")
+        if self.multiplied: self.mode = "Servo"
+
+        # Target limits
+        self.min = int(channel_dict["@min"])
+        self.max = int(channel_dict["@max"])
+
+        # Home
+        self.home_mode = channel_dict["@homemode"]
+        self.home = int(channel_dict["@home"])
+
+        # Save target position
+        self.target = 0
+
+
+    # Updates the stored target value of the channel
+    # Coerce target to be within bounds
+    def update_target(self, target):
+        if target < self.min:
+            target = self.min
+        
+        elif target > self.max:
+            target = self.max
+
+        self.target = target
+
+
+
 class Controller:
     # When connected via USB, the Maestro creates two virtual serial ports /dev/ttyACM0 for commands and /dev/ttyACM1 for communications.
     # Be sure the Maestro is configured for "USB Dual Port" serial mode. "USB Chained Mode" may work as well, but hasn't been tested.
-    def __init__(self,ttyStr='/dev/ttyACM0', device=0x0c):
-        # Open the command port
-        self.usb = serial.Serial(ttyStr, baudrate=115200)
+    def __init__(self, settings_file, ttyStr='/dev/ttyACM0'):
 
+        # Load settings file
+        with open(settings_file, 'r') as f:
+            settings = xmltodict.parse(f.read())
+            f.close()
+
+        # Handle different serial modes????
+
+        # Serial Mode
+        self.usb = serial.Serial(
+            ttyStr, 
+            baudrate = int(settings["FixedBaudRate"]), 
+            timeout = int(settings["SerialTimeout"]) if int(settings["SerialTimeout"]) > 0 else None 
+        ) 
+
+        # Save CRC preference
+        self.crc_enabled = (settings["EnableCrc"] == "true")
+
+        # Save device number
         # Command lead-in and device number are sent for each Pololu serial command.
-        self.PololuCmd = chr(0xaa) + chr(device)
+        self.device = int(settings["SerialDeviceNumber"])
+        self.PololuCmd = chr(0xaa) + chr(self.device)
 
-        # Track target position for each servo. The function isMoving() will
-        # use the Target vs Current servo position to determine if movement is
-        # occurring.  Up to 24 servos on a Maestro, (0-23). Targets start at 0.
-        self.Targets = [0] * 24
+        # Save period and period multiplier
+        self.period = int(settings["Channels"]["@MiniMaestroServoPeriod"]) # Units: 0.25us
+        self.multiplier = int(settings["Channels"]["@ServoMultiplier"])
 
-        # Servo minimum and maximum targets can be restricted to protect components.
-        self.Mins = [0] * 24
-        self.Maxs = [0] * 24
+        # Save individual channel settings
+        self.channels = []
+        for chan in settings["Channels"]["Channel"]:
+            self.channels.append(Channel(chan))
 
 
     # Cleanup by closing USB serial port
@@ -29,7 +79,7 @@ class Controller:
         self.usb.close()
 
 
-    # Seperate a value into high and low bytes
+    # Separate a value into high and low bytes
     def split(self, val):
         lsb = val & 0x7f # 7 bits for least significant byte
         msb = (val >> 7) & 0x7f # shift 7 and take next 7 bits for msb
@@ -56,53 +106,22 @@ class Controller:
     # Send a Pololu command out the serial port
     def sendCmd(self, cmd):
         cmdStr = self.PololuCmd + cmd
-        # cmdStr += self.crc7(cmdStr)
+
+        # Perform crc calculation
+        if self.crc_enabled: cmdStr += self.crc7(cmdStr)
+
         self.usb.write(cmdStr if PY2 else bytes(cmdStr,'latin-1'))
 
 
-    # Set channels min and max value range.  Use this as a safety to protect
-    # from accidentally moving outside known safe parameters. A setting of 0
-    # allows unrestricted movement.
-
-    # ***Note that the Maestro itself is configured to limit the range of servo travel
-    # which has precedence over these values.  Use the Maestro Control Center to configure
-    # ranges that are saved to the controller.  Use setRange for software controllable ranges.
-    def setRange(self, chan, min, max):
-        self.Mins[chan] = min
-        self.Maxs[chan] = max
-
-
-    # Return Minimum channel range value
-    def getMin(self, chan):
-        return self.Mins[chan]
-
-
-    # Return Maximum channel range value
-    def getMax(self, chan):
-        return self.Maxs[chan]
-
-
-    # Set channel to a specified target value. Servo will begin moving based
-    # on Speed and Acceleration parameters previously set.
+    # Set channel to a specified target value
     # Target values will be constrained within Min and Max range, if set.
     # For servos, target represents the pulse width in of quarter-microseconds
-    # Servo center is at 1500 microseconds, or 6000 quarter-microseconds
-    # Typically valid servo range is 3000 to 9000 quarter-microseconds
-    # If channel is configured for digital output, values < 6000 = Low output
     def setTarget(self, chan, target):
-        # if Min is defined and Target is below, force to Min
-        if self.Mins[chan] > 0 and target < self.Mins[chan]:
-            target = self.Mins[chan]
-
-        # if Max is defined and Target is above, force to Max
-        if self.Maxs[chan] > 0 and target > self.Maxs[chan]:
-            target = self.Maxs[chan]
+        # Record Target value
+        self.channels[chan].update_target(target)
 
         cmd = chr(0x04) + chr(chan) + self.split(target)
         self.sendCmd(cmd)
-
-        # Record Target value
-        self.Targets[chan] = target
 
 
     # Set a contiguous block of targets (e.g. channel 4, 5, and 6)
@@ -112,21 +131,11 @@ class Controller:
 
         # Send targets
         for n, target in enumerate(args):
-            chan = first_chan + n
-
-            # if Min is defined and Target is below, force to Min
-            if self.Mins[chan] > 0 and target < self.Mins[chan]:
-                target = self.Mins[chan]
-
-            # if Max is defined and Target is above, force to Max
-            if self.Maxs[chan] > 0 and target > self.Maxs[chan]:
-                target = self.Maxs[chan]
+            # Record Target value
+            self.channels[first_chan + n].update_target(target)
 
             # Send target
             cmd += self.split(target)
-
-            # Record Target value
-            self.Targets[chan] = target
 
         self.sendCmd(cmd)
 
@@ -139,6 +148,9 @@ class Controller:
     # values less than 6000 tell the Maestro to drive the line low,
     # while values of 6000 or greater tell the Maestro to drive the line high.
     def digitalWrite(self, chan, val):
+        if self.channels[chan].mode != "Output":
+            print("Warning: channel is not configured as output")
+
         self.setTarget(chan, val)
 
 
@@ -177,6 +189,14 @@ class Controller:
         self.sendCmd(cmd)
 
 
+    # Create a generic pwm signal on a servo channel
+    # Min should be set to lowest possible value. Max should be the same as period
+    # Behavior may be weird at duty cycles close to 0 or 1
+    def pseudoPWM(self, chan, duty):
+        period = self.period * (self.multiplier if self.channels[chan].multiplied else 1)
+        self.setTarget(chan, round(duty*period))
+
+
     # Get the current position of the device on the specified channel
     # The result is returned in a measure of quarter-microseconds, which mirrors
     # the Target parameter of setTarget.
@@ -196,12 +216,22 @@ class Controller:
     # If the channel is configured as an input, the position represents the voltage measured on the channel.
     # The inputs on channels 12–23 are digital: their values are either exactly 0 or exactly 1023.
     def digitalRead(self, chan):
+        if self.channels[chan].mode != "Input":
+            print("Warning: channel is not configured as input")
+        elif chan < 12:
+            print("Warning: channels 0-11 only support analog inputs")
+        
         return self.HIGH if self.getPosition(chan) == 1023 else self.LOW
 
 
     # If the channel is configured as an input, the position represents the voltage measured on the channel.
     # The inputs on channels 0–11 are analog: their values range from 0 to 1023, representing voltages from 0 to 5 V
     def analogRead(self, chan):
+        if self.channels[chan].mode != "Input":
+            print("Warning: channel is not configured as input")
+        elif chan > 11:
+            print("Warning: channels 12-23 only support digital inputs")
+        
         return self.getPosition(chan)
 
 
@@ -251,8 +281,13 @@ class Controller:
 
 
     # Go home
-    # !!!!!!!!!!!!!! THIS MESSES UP TARGETS
     def goHome(self):
+
+        # Update targets
+        for chan in self.channels:
+            if chan.home_mode == "Go to": #!!!!!!!!!!! not tested
+                chan.target = chan.home
+
         cmd = chr(0x22)
         self.sendCmd(cmd)
 
@@ -262,12 +297,10 @@ class Controller:
     # Maestro subroutine to either infinitely loop, or just end (return is not valid).
     def runScriptSub(self, subNumber, param=None):
         # Pass a parameter to script
-        if param != None:
-            cmd = chr(0x28) + chr(subNumber) + self.split(param)
+        if param != None: cmd = chr(0x28) + chr(subNumber) + self.split(param)
 
         # Run script with no parameter
-        else:
-            cmd = chr(0x27) + chr(subNumber)
+        else: cmd = chr(0x27) + chr(subNumber)
 
         self.sendCmd(cmd)
 
